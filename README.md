@@ -4,6 +4,19 @@ Eliza implementation using the combot framework.
 
 This application also serves as a blue-print for applications in the combot framework.
 
+## Getting started
+
+Follow the install and run instructions in the [Eliza parent](https://github.com/leolani/eliza-parent.git).
+
+After starting the application, wait until all services and the backend server are started. Until that point
+is reached, there will be warnings about failed connections to the backend in the logs, which can be ignored. This can
+take a while, especially at the first run of the application, as models for the ASR module may need to be downloaded.
+
+Once the application is fully started, it will greet the user. You can interact with the application either by speech or
+using the chat UI, which is available at [http://localhost:8000/chatui/static/chat.html](http://localhost:8000/chatui/static/chat.html).
+Currently, when running locally, output will be only to stdout or the Chat UI, as there is no text to speech
+implementation in place.
+
 ## Application Architecture
 
 ![Eliza app - Architectur](doc/ElizaCombot.png)
@@ -53,7 +66,7 @@ Subscribes to text signals and publishes text signals from user input.
 ### Events
 
 The event payploads used to communicate between the individual modules follow the
-[EMISSOR](https://github.com/leolani/EMISSOR.git) framework. To be continued..
+[EMISSOR](https://github.com/leolani/emissor.git) framework. To be continued..
 
 ## Application Runtimes
 
