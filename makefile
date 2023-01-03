@@ -5,6 +5,7 @@ project_dependencies ?= $(addprefix $(project_root)/, \
 		cltl-combot \
 		cltl-requirements \
 		cltl-backend \
+		cltl-emissor-data \
 		cltl-vad \
 		cltl-asr \
 		cltl-eliza \

@@ -1,6 +1,13 @@
+import contextlib
+import json
 import logging.config
+import os
+from datetime import datetime
+import random
 
-from cltl.asr.speechbrain_asr import SpeechbrainASR
+import requests
+import time
+
 from cltl.backend.api.backend import Backend
 from cltl.backend.api.camera import CameraResolution, Camera
 from cltl.backend.api.microphone import Microphone
@@ -18,6 +25,7 @@ from cltl.backend.spi.image import ImageSource
 from cltl.backend.spi.text import TextOutput
 from cltl.chatui.api import Chats
 from cltl.chatui.memory import MemoryChats
+from cltl.combot.event.bdi import IntentionEvent
 from cltl.combot.infra.config.k8config import K8LocalConfigurationContainer
 from cltl.combot.infra.di_container import singleton
 from cltl.combot.infra.event import Event
@@ -25,17 +33,28 @@ from cltl.combot.infra.event.memory import SynchronousEventBusContainer
 from cltl.combot.infra.resource.threaded import ThreadedResourceContainer
 from cltl.eliza.api import Eliza
 from cltl.eliza.eliza import ElizaImpl
+from cltl.gestures.gestures import GestureType
 from cltl.vad.webrtc_vad import WebRtcVAD
 from cltl_service.asr.service import AsrService
 from cltl_service.backend.backend import BackendService
-from cltl_service.backend.schema import TextSignalEvent
 from cltl_service.backend.storage import StorageService
 from cltl_service.chatui.service import ChatUiService
 from cltl_service.eliza.service import ElizaService
+from cltl_service.intentions.init import InitService
 from cltl_service.vad.service import VadService
 from flask import Flask
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from werkzeug.serving import run_simple
+
+from cltl.emissordata.api import EmissorDataStorage
+from cltl.emissordata.file_storage import EmissorDataFileStorage
+from cltl_service.bdi.service import BDIService
+from cltl_service.context.service import ContextService
+from cltl_service.emissordata.client import EmissorDataClient
+from cltl_service.emissordata.service import EmissorDataService
+from cltl_service.keyword.service import KeywordService
+
+from emissor.representation.util import serializer as emissor_serializer
 
 logging.config.fileConfig('config/logging.config', disable_existing_loggers=False)
 logger = logging.getLogger(__name__)
@@ -47,6 +66,22 @@ class InfraContainer(SynchronousEventBusContainer, K8LocalConfigurationContainer
 
     def stop(self):
         pass
+
+
+class RemoteTextOutput(TextOutput):
+    def __init__(self, remote_url: str):
+        self._remote_url = remote_url
+
+    def consume(self, text: str, language=None):
+        tts_headers = {'Content-type': 'text/plain'}
+
+        # animation = gestures.BOW
+        animation = f"{random.choice(list(GestureType))}"
+        print("THIS IS WHAT YOU SHOULD VERBALIZE FOR US:", text, animation)
+
+        response = f"\\^startTag({animation}){text}^stopTag({animation})"  #### cannot pass in strings with quotes!!
+
+        requests.post(f"{self._remote_url}/text", data=response, headers=tts_headers)
 
 
 class BackendContainer(InfraContainer):
@@ -73,7 +108,12 @@ class BackendContainer(InfraContainer):
     @property
     @singleton
     def text_output(self) -> TextOutput:
-        return ConsoleOutput()
+        config = self.config_manager.get_config("cltl.backend.text_output")
+        remote_url = config.get("remote_url")
+        if remote_url:
+            return RemoteTextOutput(remote_url)
+        else:
+            return ConsoleOutput()
 
     @property
     @singleton
@@ -111,18 +151,23 @@ class BackendContainer(InfraContainer):
     @property
     @singleton
     def server(self) -> Flask:
+        if not self.config_manager.get_config('cltl.backend').get_boolean("run_server"):
+            # Return a placeholder
+            return ""
+
         audio_config = self.config_manager.get_config('cltl.audio')
         video_config = self.config_manager.get_config('cltl.video')
-        server = BackendServer(audio_config.get_int('sampling_rate'), audio_config.get_int('channels'),
-                               audio_config.get_int('frame_size'),
-                               video_config.get_enum('resolution', CameraResolution),
-                               video_config.get_int('camera_index'))
 
-        return server.app
+        return BackendServer(audio_config.get_int('sampling_rate'), audio_config.get_int('channels'),
+                             audio_config.get_int('frame_size'),
+                             video_config.get_enum('resolution', CameraResolution),
+                             video_config.get_int('camera_index'))
 
     def start(self):
         logger.info("Start Backend")
         super().start()
+        if self.server:
+            self.server.start()
         self.storage_service.start()
         self.backend_service.start()
 
@@ -130,6 +175,8 @@ class BackendContainer(InfraContainer):
         logger.info("Stop Backend")
         self.storage_service.stop()
         self.backend_service.stop()
+        if self.server:
+            self.server.stop()
         super().stop()
 
 
@@ -161,7 +208,35 @@ class VADContainer(InfraContainer):
         super().stop()
 
 
-class ASRContainer(InfraContainer):
+class EmissorStorageContainer(InfraContainer):
+    @property
+    @singleton
+    def emissor_storage(self) -> EmissorDataStorage:
+        return EmissorDataFileStorage.from_config(self.config_manager)
+
+    @property
+    @singleton
+    def emissor_data_service(self) -> EmissorDataService:
+        return EmissorDataService.from_config(self.emissor_storage,
+                                              self.event_bus, self.resource_manager, self.config_manager)
+
+    @property
+    @singleton
+    def emissor_data_client(self) -> EmissorDataClient:
+        return EmissorDataClient("http://0.0.0.0:8000/emissor")
+
+    def start(self):
+        logger.info("Start Emissor Data Storage")
+        super().start()
+        self.emissor_data_service.start()
+
+    def stop(self):
+        logger.info("Stop Emissor Data Storage")
+        self.emissor_data_service.stop()
+        super().stop()
+
+
+class ASRContainer(EmissorStorageContainer, InfraContainer):
     @property
     @singleton
     def asr_service(self) -> AsrService:
@@ -173,7 +248,12 @@ class ASRContainer(InfraContainer):
         # DEBUG
         # storage = "/Users/tkb/automatic/workspaces/robo/eliza-parent/cltl-eliza-app/py-app/storage/audio/debug/asr"
 
-        if implementation == "speechbrain":
+        if implementation == "google":
+            from cltl.asr.google_asr import GoogleASR
+            impl_config = self.config_manager.get_config("cltl.asr.google")
+            asr = GoogleASR(impl_config.get("language"), impl_config.get_int("sampling_rate"),
+                            hints=impl_config.get("hints", multi=True))
+        elif implementation == "speechbrain":
             from cltl.asr.speechbrain_asr import SpeechbrainASR
             impl_config = self.config_manager.get_config("cltl.asr.speechbrain")
             model = impl_config.get("model")
@@ -183,19 +263,81 @@ class ASRContainer(InfraContainer):
             impl_config = self.config_manager.get_config("cltl.asr.wav2vec")
             model = impl_config.get("model")
             asr = Wav2Vec2ASR(model, sampling_rate=sampling_rate, storage=storage)
+        elif not implementation:
+            asr = False
         else:
             raise ValueError("Unsupported implementation " + implementation)
 
-        return AsrService.from_config(asr, self.event_bus, self.resource_manager, self.config_manager)
+        if asr:
+            return AsrService.from_config(asr, self.emissor_data_client,
+                                          self.event_bus, self.resource_manager, self.config_manager)
+        else:
+            logger.warning("No ASR implementation configured")
+            return False
 
     def start(self):
-        logger.info("Start ASR")
         super().start()
-        self.asr_service.start()
+        if self.asr_service:
+            logger.info("Start ASR")
+            self.asr_service.start()
 
     def stop(self):
-        logger.info("Stop ASR")
-        self.asr_service.stop()
+        if self.asr_service:
+            logger.info("Stop ASR")
+            self.asr_service.stop()
+        super().stop()
+
+
+class ElizaComponentsContainer(EmissorStorageContainer, InfraContainer):
+    @property
+    @singleton
+    def keyword_service(self) -> KeywordService:
+        return KeywordService.from_config(self.emissor_data_client,
+                                          self.event_bus, self.resource_manager, self.config_manager)
+
+    @property
+    @singleton
+    def context_service(self) -> ContextService:
+        return ContextService.from_config(self.event_bus, self.resource_manager, self.config_manager)
+
+    @property
+    @singleton
+    def keyword_service(self) -> KeywordService:
+        return KeywordService.from_config(self.emissor_data_client,
+                                          self.event_bus, self.resource_manager, self.config_manager)
+
+    @property
+    @singleton
+    def bdi_service(self) -> BDIService:
+        # TODO make configurable
+        bdi_model = {"init":
+                         {"initialized": ["eliza"]},
+                     "eliza":
+                         {"quit": ["init"]}
+                     }
+
+        return BDIService.from_config(bdi_model, self.event_bus, self.resource_manager, self.config_manager)
+
+    @property
+    @singleton
+    def init_intention(self) -> InitService:
+        return InitService.from_config(self.emissor_data_client,
+                                       self.event_bus, self.resource_manager, self.config_manager)
+
+    def start(self):
+        logger.info("Start Eliza services")
+        super().start()
+        self.bdi_service.start()
+        self.keyword_service.start()
+        self.context_service.start()
+        self.init_intention.start()
+
+    def stop(self):
+        logger.info("Stop Eliza services")
+        self.init_intention.stop()
+        self.bdi_service.stop()
+        self.keyword_service.stop()
+        self.context_service.stop()
         super().stop()
 
 
@@ -221,7 +363,7 @@ class ChatUIContainer(InfraContainer):
         super().stop()
 
 
-class ElizaContainer(InfraContainer):
+class ElizaContainer(EmissorStorageContainer, InfraContainer):
     @property
     @singleton
     def eliza(self) -> Eliza:
@@ -230,7 +372,8 @@ class ElizaContainer(InfraContainer):
     @property
     @singleton
     def eliza_service(self) -> ElizaService:
-        return ElizaService.from_config(self.eliza, self.event_bus, self.resource_manager, self.config_manager)
+        return ElizaService.from_config(self.eliza, self.emissor_data_client,
+                                        self.event_bus, self.resource_manager, self.config_manager)
 
     def start(self):
         logger.info("Start Eliza")
@@ -243,8 +386,51 @@ class ElizaContainer(InfraContainer):
         super().stop()
 
 
-class ApplicationContainer(ElizaContainer, ChatUIContainer, ASRContainer, VADContainer, BackendContainer):
+class ApplicationContainer(ElizaContainer, ElizaComponentsContainer,
+                           ChatUIContainer,
+                           ASRContainer, VADContainer,
+                           EmissorStorageContainer, BackendContainer):
     pass
+
+
+def get_event_log_path(config):
+    log_dir = config.get('event_log')
+    date_now = datetime.now()
+
+    os.makedirs(log_dir, exist_ok=True)
+
+    return f"{log_dir}/{date_now :%y_%m_%d-%H_%M_%S}.json"
+
+
+@contextlib.contextmanager
+def event_log(event_bus, config):
+    def log_event(event):
+        try:
+            event_log.write(json.dumps(event, default=serializer, indent=2) + ',\n')
+        except:
+            logger.exception("Failed to write event: %s", event)
+
+    with open(get_event_log_path(config), "w") as event_log:
+        event_log.writelines(['['])
+
+        topics = event_bus.topics
+        for topic in topics:
+            event_bus.subscribe(topic, log_event)
+        logger.info("Subscribed %s to %s", event_log.name, topics)
+
+        yield None
+
+        event_log.writelines([']'])
+
+
+def serializer(obj):
+    try:
+        return emissor_serializer(obj)
+    except Exception:
+        try:
+            return vars(obj)
+        except Exception:
+            return str(obj)
 
 
 def main():
@@ -255,26 +441,29 @@ def main():
     application = ApplicationContainer()
     application.start()
 
+    intention_topic = application.config_manager.get_config("cltl.bdi").get("topic_intention")
+    application.event_bus.publish(intention_topic, Event.for_payload(IntentionEvent(["init"])))
 
-    def print_event(event: Event):
-        logger.info("APP event (%s): (%s)", event.metadata.topic, event.payload)
-    def print_text_event(event: Event[TextSignalEvent]):
-        logger.info("UTTERANCE event (%s): (%s)", event.metadata.topic, event.payload.signal.text)
+    config = application.config_manager.get_config("cltl.leolani")
+    with event_log(application.event_bus, config):
+        routes = {
+            '/storage': application.storage_service.app,
+            '/emissor': application.emissor_data_service.app,
+            '/chatui': application.chatui_service.app
+        }
 
-    application.event_bus.subscribe("cltl.topic.microphone", print_event)
-    application.event_bus.subscribe("cltl.topic.vad", print_event)
-    application.event_bus.subscribe("cltl.topic.text_in", print_text_event)
-    application.event_bus.subscribe("cltl.topic.text_out", print_text_event)
+        if application.server:
+            routes['/host'] = application.server.app
 
-    web_app = DispatcherMiddleware(Flask("Eliza app"), {
-        '/host': application.server,
-        '/storage': application.storage_service.app,
-        '/chatui': application.chatui_service.app,
-    })
+        web_app = DispatcherMiddleware(Flask("Eliza app"), routes)
 
-    run_simple('0.0.0.0', 8000, web_app, threaded=True, use_reloader=False, use_debugger=False, use_evalex=True)
+        run_simple('0.0.0.0', 8000, web_app, threaded=True, use_reloader=False, use_debugger=False, use_evalex=True)
 
-    application.stop()
+        intention_topic = application.config_manager.get_config("cltl.bdi").get("topic_intention")
+        application.event_bus.publish(intention_topic, Event.for_payload(IntentionEvent(["terminate"])))
+        time.sleep(1)
+
+        application.stop()
 
 
 if __name__ == '__main__':
