@@ -4,6 +4,7 @@ cltl.vad[impl,service]
 cltl.emissor-data[impl,service,client]
 cltl.chat-ui
 cltl.eliza
+persbot
 
 flask
 werkzeug

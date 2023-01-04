@@ -9,6 +9,7 @@ project_dependencies ?= $(addprefix $(project_root)/, \
 		cltl-vad \
 		cltl-asr \
 		cltl-eliza \
+		persbot \
 		cltl-chat-ui)
 
 git_remote ?= https://github.com/leolani

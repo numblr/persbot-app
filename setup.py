@@ -25,7 +25,7 @@ setup(
         "cltl.asr[google,service]",
         "cltl.vad[impl,service]",
         "cltl.chat-ui",
-        "cltl.eliza",
+        "persbot",
         "flask",
         "werkzeug"
     ],

@@ -43,6 +43,9 @@ from cltl_service.eliza.service import ElizaService
 from cltl_service.intentions.init import InitService
 from cltl_service.vad.service import VadService
 from flask import Flask
+from hi.persbot.api import Persbot
+from hi.persbot.persbot import PersbotImpl
+from hi_service.persbot.service import PersbotService
 from werkzeug.middleware.dispatcher import DispatcherMiddleware
 from werkzeug.serving import run_simple
 
@@ -311,8 +314,8 @@ class ElizaComponentsContainer(EmissorStorageContainer, InfraContainer):
     def bdi_service(self) -> BDIService:
         # TODO make configurable
         bdi_model = {"init":
-                         {"initialized": ["eliza"]},
-                     "eliza":
+                         {"initialized": ["persbot"]},
+                     "persbot":
                          {"quit": ["init"]}
                      }
 
@@ -386,7 +389,30 @@ class ElizaContainer(EmissorStorageContainer, InfraContainer):
         super().stop()
 
 
-class ApplicationContainer(ElizaContainer, ElizaComponentsContainer,
+class PersbotContainer(EmissorStorageContainer, InfraContainer):
+    @property
+    @singleton
+    def persbot(self) -> Persbot:
+        return PersbotImpl()
+
+    @property
+    @singleton
+    def persbot_service(self) -> PersbotService:
+        return PersbotService.from_config(self.persbot, self.emissor_data_client,
+                                        self.event_bus, self.resource_manager, self.config_manager)
+
+    def start(self):
+        logger.info("Start Persbot")
+        super().start()
+        self.persbot_service.start()
+
+    def stop(self):
+        logger.info("Stop Eliza")
+        self.persbot_service.stop()
+        super().stop()
+
+
+class ApplicationContainer(PersbotContainer, ElizaComponentsContainer,
                            ChatUIContainer,
                            ASRContainer, VADContainer,
                            EmissorStorageContainer, BackendContainer):
